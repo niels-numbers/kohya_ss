@@ -8,10 +8,11 @@ import argparse
 Script to compare two Stable Diffusion (SDXL) models (a base model and a fine-tuned version)
 by calculating the L2 norm of the difference for each layer.
 It then reports these change magnitudes, aggregated into ComfyUI-style U-Net blocks
-(e.g., INPUT_BLOCK_0, MIDDLE_BLOCK, OUTPUT_BLOCK_8), sorted from most to least modified block.
+(e.g., INPUT_BLOCK_0, MIDDLE_BLOCK, OUTPUT_BLOCK_8). The report is ordered according
+to the typical ComfyUI ModelMergeSDXL node interface for easy comparison.
 This helps identify which parts of the model were most affected by fine-tuning.
 The block definitions are based on common tensor naming conventions like those used in
-ComfyUI's ModelMergeSDXL node, assuming state dict keys like 'model.diffusion_model.input_blocks.0.conv.weight'.
+ComfyUI's ModelMergeSDXL node, assuming state dict keys such as 'model.diffusion_model.input_blocks.0.conv.weight'.
 """
 
 # COMFYUI_BLOCK_PREFIXES: This dictionary maps human-readable block names (keys)
@@ -43,6 +44,34 @@ COMFYUI_BLOCK_PREFIXES = {
     "OUTPUT_BLOCK_8": "model.diffusion_model.output_blocks.8.", # End of U-Net decoder output blocks
     "OUT": "model.diffusion_model.out.",                       # Final output convolution layer
 }
+
+# COMFYUI_NODE_BLOCK_ORDER: Defines the specific display order for blocks in the report,
+# matching the visual layout of nodes like ComfyUI's ModelMergeSDXL.
+# This ensures the report is intuitive for users familiar with that interface.
+COMFYUI_NODE_BLOCK_ORDER = [
+    "TIME_EMBED",
+    "LABEL_EMBED",
+    "INPUT_BLOCK_0",
+    "INPUT_BLOCK_1",
+    "INPUT_BLOCK_2",
+    "INPUT_BLOCK_3",
+    "INPUT_BLOCK_4",
+    "INPUT_BLOCK_5",
+    "INPUT_BLOCK_6",
+    "INPUT_BLOCK_7",
+    "INPUT_BLOCK_8",
+    "MIDDLE_BLOCK",  # In ComfyUI, this often represents multiple 'middle_block' layers
+    "OUTPUT_BLOCK_0",
+    "OUTPUT_BLOCK_1",
+    "OUTPUT_BLOCK_2",
+    "OUTPUT_BLOCK_3",
+    "OUTPUT_BLOCK_4",
+    "OUTPUT_BLOCK_5",
+    "OUTPUT_BLOCK_6",
+    "OUTPUT_BLOCK_7",
+    "OUTPUT_BLOCK_8",
+    "OUT",
+]
 
 def extract_model_differences(base_model_path, finetuned_model_path):
     """
@@ -190,27 +219,47 @@ def report_block_changes(layer_magnitudes, block_prefixes_map):
                 block_totals[block_name_key] += magnitude
                 found_block = True
                 break # Layer is assigned to the first matching block.
-        # If no predefined block prefix matches, add to "UNMAPPED".
+        # If no predefined block prefix matches, add its magnitude to the "UNMAPPED" category.
         if not found_block:
             block_totals["UNMAPPED"] += magnitude
     
-    # Sort the aggregated block totals by magnitude in descending order for reporting.
-    sorted_blocks = sorted(block_totals.items(), key=lambda item: item[1], reverse=True)
+    # --- Construct the ordered list for the report ---
+    ordered_report_items = []
+    processed_keys = set() # Keep track of keys already added from COMFYUI_NODE_BLOCK_ORDER
 
-    print("\n--- Aggregated Changes by ComfyUI Block (Most to Least Modified) ---")
-    if not sorted_blocks: # Should not happen if UNMAPPED is always present, but good check.
+    # First, add items in the order specified by COMFYUI_NODE_BLOCK_ORDER
+    for block_name_key in COMFYUI_NODE_BLOCK_ORDER:
+        if block_name_key in block_totals: # Check if the key exists in our calculated totals
+            ordered_report_items.append((block_name_key, block_totals[block_name_key]))
+            processed_keys.add(block_name_key)
+
+    # Second, add any remaining items from block_totals that were not in COMFYUI_NODE_BLOCK_ORDER.
+    # This primarily includes "UNMAPPED", but also any other unexpected block keys
+    # that might arise if COMFYUI_BLOCK_PREFIXES has keys not in COMFYUI_NODE_BLOCK_ORDER.
+    # These remaining items are sorted by key name for consistent output.
+    remaining_items = []
+    for key, value in block_totals.items():
+        if key not in processed_keys:
+            remaining_items.append((key, value))
+    remaining_items.sort(key=lambda item: item[0]) # Sort alphabetically by block name/key
+    ordered_report_items.extend(remaining_items)
+
+    # --- Print the report ---
+    # The title reflects that the primary ordering is by the ComfyUI node interface.
+    print("\n--- Aggregated Changes by ComfyUI Block (Ordered by Node Interface) ---")
+    if not ordered_report_items: # Should generally not be empty if UNMAPPED is present
         print("No block changes were calculated or available to report.")
         return
         
-    # Print the sorted block names and their total change magnitudes.
-    for name, mag in sorted_blocks:
+    # Print the block names and their total change magnitudes according to the constructed order.
+    for name, mag in ordered_report_items:
         print(f"Block: {name}, Total Change Magnitude (L2 Norm): {mag:.6e}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Compares two SDXL models (base and fine-tuned) and reports aggregated "
-                    "layer change magnitudes by ComfyUI-style U-Net block structure. "
+                    "layer change magnitudes, ordered by the ComfyUI U-Net block structure. " # Updated description
                     "This helps identify which parts of the U-Net were most affected by fine-tuning."
     )
     parser.add_argument("base_model_path", type=str, help="File path for the BASE model (.safetensors).")
