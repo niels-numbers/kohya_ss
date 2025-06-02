@@ -1,33 +1,63 @@
 import torch
-from safetensors.torch import load_file, save_file
-from collections import OrderedDict
+from safetensors.torch import load_file # save_file removed
+from collections import OrderedDict # OrderedDict might be removed if delta_state_dict is gone
 import os
-import argparse # Import argparse
+import argparse
 
 """
-Script to calculate the difference between two model state dictionaries (base vs. fine-tuned).
-It can save the resulting delta weights to a .safetensors file and also
-reports the layers with the most significant changes (L2 norm of the difference)
-to the console, from most to least modified.
+Script to compare two Stable Diffusion (SDXL) models (a base model and a fine-tuned version)
+by calculating the L2 norm of the difference for each layer.
+It then reports these change magnitudes, aggregated into ComfyUI-style U-Net blocks
+(e.g., INPUT_BLOCK_0, MIDDLE_BLOCK, OUTPUT_BLOCK_8), sorted from most to least modified block.
+This helps identify which parts of the model were most affected by fine-tuning.
+The block definitions are based on common tensor naming conventions like those used in
+ComfyUI's ModelMergeSDXL node, assuming state dict keys like 'model.diffusion_model.input_blocks.0.conv.weight'.
 """
 
-def extract_model_differences(base_model_path, finetuned_model_path, output_delta_path=None, save_dtype_str="float32"):
+# COMFYUI_BLOCK_PREFIXES: This dictionary maps human-readable block names (keys)
+# to the prefixes of tensor names (values) found in a typical SDXL model's state_dict.
+# The script assumes that tensor names generally start with 'model.diffusion_model.'
+# followed by specific block names (e.g., 'input_blocks.0', 'middle_block', 'output_blocks.8').
+# The 'LABEL_EMBED' prefix is based on common U-Net patterns and might be model-specific or tentative.
+COMFYUI_BLOCK_PREFIXES = {
+    "TIME_EMBED": "model.diffusion_model.time_embed.",      # Time embedding layers
+    "LABEL_EMBED": "model.diffusion_model.label_emb.",     # Label (e.g., class) embedding, can be model-specific
+    "INPUT_BLOCK_0": "model.diffusion_model.input_blocks.0.", # Start of U-Net encoder
+    "INPUT_BLOCK_1": "model.diffusion_model.input_blocks.1.",
+    "INPUT_BLOCK_2": "model.diffusion_model.input_blocks.2.",
+    "INPUT_BLOCK_3": "model.diffusion_model.input_blocks.3.",
+    "INPUT_BLOCK_4": "model.diffusion_model.input_blocks.4.",
+    "INPUT_BLOCK_5": "model.diffusion_model.input_blocks.5.",
+    "INPUT_BLOCK_6": "model.diffusion_model.input_blocks.6.",
+    "INPUT_BLOCK_7": "model.diffusion_model.input_blocks.7.",
+    "INPUT_BLOCK_8": "model.diffusion_model.input_blocks.8.", # End of U-Net encoder input blocks
+    "MIDDLE_BLOCK": "model.diffusion_model.middle_block.",   # Middle block of the U-Net
+    "OUTPUT_BLOCK_0": "model.diffusion_model.output_blocks.0.", # Start of U-Net decoder
+    "OUTPUT_BLOCK_1": "model.diffusion_model.output_blocks.1.",
+    "OUTPUT_BLOCK_2": "model.diffusion_model.output_blocks.2.",
+    "OUTPUT_BLOCK_3": "model.diffusion_model.output_blocks.3.",
+    "OUTPUT_BLOCK_4": "model.diffusion_model.output_blocks.4.",
+    "OUTPUT_BLOCK_5": "model.diffusion_model.output_blocks.5.",
+    "OUTPUT_BLOCK_6": "model.diffusion_model.output_blocks.6.",
+    "OUTPUT_BLOCK_7": "model.diffusion_model.output_blocks.7.",
+    "OUTPUT_BLOCK_8": "model.diffusion_model.output_blocks.8.", # End of U-Net decoder output blocks
+    "OUT": "model.diffusion_model.out.",                       # Final output convolution layer
+}
+
+def extract_model_differences(base_model_path, finetuned_model_path):
     """
-    Calculates the difference between the state dictionaries of a fine-tuned model
-    and a base model. Also identifies and sorts layers by the magnitude of their change.
+    Calculates the L2 norm of differences (change magnitude) between common layers
+    of a fine-tuned model and a base model. For layers present only in the
+    fine-tuned model, it calculates the L2 norm of the layer's tensor itself.
 
     Args:
-        base_model_path (str): Path to the base model .safetensors file.
-        finetuned_model_path (str): Path to the fine-tuned model .safetensors file.
-        output_delta_path (str, optional): Path to save the resulting delta weights
-                                           .safetensors file. If None, not saved.
-        save_dtype_str (str, optional): Data type to save the delta weights ('float32', 'float16', 'bfloat16').
-                                        Defaults to 'float32'.
+        base_model_path (str): Path to the base model (.safetensors) file.
+        finetuned_model_path (str): Path to the fine-tuned model (.safetensors) file.
     Returns:
-        tuple: (OrderedDict, list)
-               - A state dictionary containing the delta weights (model differences).
-               - A list of tuples (layer_name, magnitude), sorted by magnitude in descending order.
-               Returns (None, []) if loading fails or other critical errors.
+        list: A list of (layer_name, magnitude) tuples, sorted by magnitude in
+              descending order. Returns `None` if critical model loading errors occur.
+              Returns an empty list if models load but no common layers with
+              differences or unique layers in the fine-tuned model are found.
     """
     print(f"Loading base model from: {base_model_path}")
     try:
@@ -36,7 +66,7 @@ def extract_model_differences(base_model_path, finetuned_model_path, output_delt
         print(f"Base model loaded. Found {len(base_state_dict)} tensors.")
     except Exception as e:
         print(f"Error loading base model: {e}")
-        return None, []
+        return None # Return None on critical error
 
     print(f"\nLoading fine-tuned model from: {finetuned_model_path}")
     try:
@@ -44,16 +74,16 @@ def extract_model_differences(base_model_path, finetuned_model_path, output_delt
         print(f"Fine-tuned model loaded. Found {len(finetuned_state_dict)} tensors.")
     except Exception as e:
         print(f"Error loading fine-tuned model: {e}")
-        return None, []
+        return None # Return None on critical error
 
-    delta_state_dict = OrderedDict()
+    # delta_state_dict = OrderedDict() # No longer need to store deltas
     diff_count = 0
     skipped_count = 0
     error_count = 0
     unique_to_finetuned_count = 0
     unique_to_base_count = 0
     # Initialize a list to store tuples of (layer_name, magnitude_of_change)
-    layer_magnitudes = []
+    layer_magnitudes = [] 
 
     print("\nCalculating differences...")
 
@@ -86,22 +116,22 @@ def extract_model_differences(base_model_path, finetuned_model_path, output_delt
             magnitude = torch.linalg.norm(delta_tensor.float()).item()
             # Store the layer name and its change magnitude
             layer_magnitudes.append((key, magnitude))
-            delta_state_dict[key] = delta_tensor
+            # delta_state_dict[key] = delta_tensor # No longer storing deltas
             diff_count += 1
         except Exception as e:
             print(f"Error calculating difference for key '{key}': {e}")
             error_count += 1
 
     for key in keys_only_in_finetuned:
-        print(f"Warning: Key '{key}' (Shape: {finetuned_state_dict[key].shape}, Dtype: {finetuned_state_dict[key].dtype}) is present in fine-tuned model but not in base model. Storing as is.")
+        print(f"Warning: Key '{key}' (Shape: {finetuned_state_dict[key].shape}, Dtype: {finetuned_state_dict[key].dtype}) is present in fine-tuned model but not in base model. Recording its magnitude.")
         tensor = finetuned_state_dict[key]
-        delta_state_dict[key] = tensor # Store the tensor from the finetuned model
+        # delta_state_dict[key] = tensor # No longer storing deltas
         # For layers only in the fine-tuned model, calculate the L2 norm of the tensor itself
         magnitude = torch.linalg.norm(tensor.float()).item()
-        # Store the layer name and its magnitude (note: this is not a 'change' magnitude)
+        # Store the layer name and its magnitude
         layer_magnitudes.append((key, magnitude))
         unique_to_finetuned_count += 1
-
+        
     if keys_only_in_base:
         print(f"\nWarning: {len(keys_only_in_base)} key(s) are present only in the base model and will not be in the delta file.")
         for key in list(keys_only_in_base)[:5]: # Print first 5 as examples
@@ -116,55 +146,80 @@ def extract_model_differences(base_model_path, finetuned_model_path, output_delt
     print(f"  {skipped_count} common layers skipped (shape/type mismatch).")
     print(f"  {error_count} common layers had errors during diffing.")
 
-    if output_delta_path and delta_state_dict:
-        save_dtype = torch.float32 # Default
-        if save_dtype_str == "float16":
-            save_dtype = torch.float16
-        elif save_dtype_str == "bfloat16":
-            save_dtype = torch.bfloat16
-        elif save_dtype_str != "float32":
-            print(f"Warning: Invalid save_dtype '{save_dtype_str}'. Defaulting to float32.")
-            save_dtype_str = "float32" # for print message
-
-        print(f"\nPreparing to save delta weights with dtype: {save_dtype_str}")
-
-        final_save_dict = OrderedDict()
-        for k, v_tensor in delta_state_dict.items():
-            if v_tensor.is_floating_point():
-                final_save_dict[k] = v_tensor.to(dtype=save_dtype)
-            else:
-                final_save_dict[k] = v_tensor # Keep non-float as is (e.g. int tensors if any)
-
-        try:
-            save_file(final_save_dict, output_delta_path)
-            print(f"Delta weights saved to: {output_delta_path}")
-        except Exception as e:
-            print(f"Error saving delta weights: {e}")
-            import traceback
-            traceback.print_exc()
+    # output_delta_path and save_dtype logic removed.
 
     # Sort the layer_magnitudes list by magnitude (the second element of each tuple)
     # in descending order (largest magnitude first) to see the most impactful changes.
     layer_magnitudes.sort(key=lambda x: x[1], reverse=True)
 
-    # Return both the dictionary of delta weights and the sorted list of layer change magnitudes
-    return delta_state_dict, layer_magnitudes
+    # Return only the sorted list of layer change magnitudes
+    return layer_magnitudes
+
+
+# New function to report aggregated block changes
+def report_block_changes(layer_magnitudes, block_prefixes_map):
+    """
+    Aggregates individual layer change magnitudes into sums for predefined model blocks
+    (e.g., INPUT_BLOCK_0, MIDDLE_BLOCK) and prints a summary report.
+
+    Args:
+        layer_magnitudes (list): A list of (layer_name, magnitude) tuples,
+                                 typically sorted by magnitude.
+        block_prefixes_map (dict): A dictionary mapping block names to their
+                                   corresponding tensor name prefixes.
+    """
+    if layer_magnitudes is None: # Handles critical error from extract_model_differences
+        print("Layer change magnitudes are not available, cannot generate block report.")
+        return
+
+    if not layer_magnitudes: # Handles case where models loaded but no diffs/layers found
+        print("No layer change magnitudes to report for block aggregation.")
+        return
+
+    # Initialize a dictionary to store the sum of magnitudes for each block.
+    # Also include an "UNMAPPED" category for layers that don't fit predefined blocks.
+    block_totals = {name: 0.0 for name in block_prefixes_map.keys()}
+    block_totals["UNMAPPED"] = 0.0
+
+    # Iterate through each layer and its calculated change magnitude.
+    for layer_name, magnitude in layer_magnitudes:
+        found_block = False
+        # Check if the layer_name starts with any of the known block prefixes.
+        for block_name_key, prefix_string in block_prefixes_map.items():
+            if layer_name.startswith(prefix_string):
+                block_totals[block_name_key] += magnitude
+                found_block = True
+                break # Layer is assigned to the first matching block.
+        # If no predefined block prefix matches, add to "UNMAPPED".
+        if not found_block:
+            block_totals["UNMAPPED"] += magnitude
+    
+    # Sort the aggregated block totals by magnitude in descending order for reporting.
+    sorted_blocks = sorted(block_totals.items(), key=lambda item: item[1], reverse=True)
+
+    print("\n--- Aggregated Changes by ComfyUI Block (Most to Least Modified) ---")
+    if not sorted_blocks: # Should not happen if UNMAPPED is always present, but good check.
+        print("No block changes were calculated or available to report.")
+        return
+        
+    # Print the sorted block names and their total change magnitudes.
+    for name, mag in sorted_blocks:
+        print(f"Block: {name}, Total Change Magnitude (L2 Norm): {mag:.6e}")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Extracts weight differences between a fine-tuned and a base model, "
-                                                 "reports layers with most changes, and optionally saves delta weights.")
+    parser = argparse.ArgumentParser(
+        description="Compares two SDXL models (base and fine-tuned) and reports aggregated "
+                    "layer change magnitudes by ComfyUI-style U-Net block structure. "
+                    "This helps identify which parts of the U-Net were most affected by fine-tuning."
+    )
     parser.add_argument("base_model_path", type=str, help="File path for the BASE model (.safetensors).")
     parser.add_argument("finetuned_model_path", type=str, help="File path for the FINE-TUNED model (.safetensors).")
-    parser.add_argument("--output_path", type=str, default=None,
-                        help="Optional: File path to save the calculated delta weights (.safetensors). "
-                             "If not provided, defaults to 'model_deltas/delta_[finetuned_model_name].safetensors'.")
-    parser.add_argument("--save_dtype", type=str, default="float32", choices=["float32", "float16", "bfloat16"],
-                        help="Data type for saving the delta weights. Choose from 'float32', 'float16', 'bfloat16'. "
-                             "Defaults to 'float32'.")
+    # --output_path and --save_dtype arguments removed.
 
     args = parser.parse_args()
 
-    print("--- Model Difference Extraction Script ---")
+    print("--- Model Layer Change Report Script ---") # Updated script title
 
     if not os.path.exists(args.base_model_path):
         print(f"Error: Base model file not found at {args.base_model_path}")
@@ -173,35 +228,17 @@ if __name__ == "__main__":
         print(f"Error: Fine-tuned model file not found at {args.finetuned_model_path}")
         exit(1)
 
-    output_delta_file = args.output_path
-    if output_delta_file is None:
-        output_dir = "model_deltas"
-        os.makedirs(output_dir, exist_ok=True)
-        finetuned_basename = os.path.splitext(os.path.basename(args.finetuned_model_path))[0]
-        output_delta_file = os.path.join(output_dir, f"delta_{finetuned_basename}.safetensors")
+    # output_delta_file logic removed.
 
-    # Ensure the output directory exists if a full path is given
-    if output_delta_file:
-        output_dir_for_file = os.path.dirname(output_delta_file)
-        if output_dir_for_file and not os.path.exists(output_dir_for_file):
-            os.makedirs(output_dir_for_file, exist_ok=True)
-
-
-    differences, sorted_layer_changes = extract_model_differences(
+    # Call extract_model_differences, now only returns layer_magnitudes
+    layer_magnitudes = extract_model_differences(
         args.base_model_path,
-        args.finetuned_model_path,
-        output_delta_path=output_delta_file,
-        save_dtype_str=args.save_dtype
+        args.finetuned_model_path
     )
 
-    if differences is not None: # Check if differences is not None, implying success
-        print(f"\nExtraction process finished. {len(differences)} total keys in the delta state_dict.")
-
-        print("\n--- Top Layer Changes (Most to Least Modified) ---")
-        if sorted_layer_changes:
-            for i, (name, mag) in enumerate(sorted_layer_changes):
-                print(f"{i+1}. Layer: {name}, Change Magnitude (L2 Norm): {mag:.6e}")
-        else:
-            print("No layer changes were calculated or available to report.")
-    else:
-        print("\nCould not extract differences due to errors during model loading.")
+    if layer_magnitudes is not None: # Indicates successful loading and processing
+        # The old detailed per-layer reporting is removed.
+        # Call the new function to report block changes
+        report_block_changes(layer_magnitudes, COMFYUI_BLOCK_PREFIXES)
+    else: # This means extract_model_differences returned None due to a loading error
+        print("\nCould not generate layer magnitudes due to model loading or processing errors.")
