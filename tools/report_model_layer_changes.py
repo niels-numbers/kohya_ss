@@ -6,10 +6,12 @@ import argparse
 
 """
 Script to compare two Stable Diffusion (SDXL) models (a base model and a fine-tuned version)
-by calculating the L2 norm of the difference for each layer.
+by calculating the L2 norm of the difference (change magnitude) for each layer.
 It then reports these change magnitudes, aggregated into ComfyUI-style U-Net blocks
 (e.g., INPUT_BLOCK_0, MIDDLE_BLOCK, OUTPUT_BLOCK_8). The report is ordered according
 to the typical ComfyUI ModelMergeSDXL node interface for easy comparison.
+For each block, it also prints a 'Strength' ratio (0-1), calculated as 1 / (1 + Change Magnitude),
+where a higher strength (closer to 1.0) indicates less change in that block.
 This helps identify which parts of the model were most affected by fine-tuning.
 The block definitions are based on common tensor naming conventions like those used in
 ComfyUI's ModelMergeSDXL node, assuming state dict keys such as 'model.diffusion_model.input_blocks.0.conv.weight'.
@@ -251,9 +253,15 @@ def report_block_changes(layer_magnitudes, block_prefixes_map):
         print("No block changes were calculated or available to report.")
         return
         
-    # Print the block names and their total change magnitudes according to the constructed order.
+    # Print the block names, their calculated strength_ratio, and total change magnitudes.
+    # The 'strength_ratio' is calculated as 1.0 / (1.0 + mag), where 'mag' is the L2 norm (magnitude).
+    # This ratio is inversely related to change: 1.0 means no change (mag=0), approaching 0.0 for large changes.
+    # The print format aligns columns for readability: Block name, Strength, and original Change Magnitude.
     for name, mag in ordered_report_items:
-        print(f"Block: {name}, Total Change Magnitude (L2 Norm): {mag:.6e}")
+        # Magnitudes (L2 norms) are non-negative, so 1.0 + mag is always >= 1.0, preventing division by zero.
+        strength_ratio = 1.0 / (1.0 + mag)
+        # Format: Block Name (left-aligned, 15 chars), Strength (left-aligned, 6 chars, 4 decimal places), Change Magnitude (scientific notation)
+        print(f"Block: {name:<15} Strength: {strength_ratio:<6.4f} (Change Magnitude: {mag:.6e})")
 
 
 if __name__ == "__main__":
